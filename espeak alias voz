@@ -1,0 +1,7 @@
+alias voz='espeak -a200 -g25 -p0 -s120 -v es '$1
+  
+-a volumen 0 200
+-g pausa entre palabras
+-p sonido metalico pitch 0 99
+-s palabras por minuto 80 450
+-v voz
