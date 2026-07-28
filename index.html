@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Notan Pipeline Camera App</title>
+  <!-- Librería para empaquetar carpetas de salida en ZIP -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body, html { width: 100%; height: 100%; overflow: hidden; background: #0a0a0c; font-family: -apple-system, system-ui, sans-serif; color: #fff; }
+    
+    #app { display: flex; flex-direction: column; height: 100vh; position: relative; }
+    .viewfinder { flex: 1; position: relative; background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+    video, canvas#previewCanvas { width: 100%; height: 100%; object-fit: cover; position: absolute; top: 0; left: 0; }
+    
+    .hud-badge {
+      position: absolute; top: 16px; left: 16px;
+      background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(8px);
+      padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
+      border: 1px solid rgba(255,255,255,0.15); z-index: 5;
+    }
+
+    .controls {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      background: linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.85) 30%, rgba(0,0,0,0.95) 100%);
+      padding: 20px 20px 30px 20px; display: flex; flex-direction: column; gap: 14px; z-index: 10;
+    }
+    
+    .mode-selector { display: flex; gap: 8px; justify-content: center; }
+    .btn-mode {
+      flex: 1; padding: 10px 12px; background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.2); color: #fff; border-radius: 10px;
+      font-size: 12px; font-weight: 600; cursor: pointer; text-align: center;
+    }
+    .btn-mode.active { background: #3b82f6; border-color: #60a5fa; box-shadow: 0 0 12px rgba(59,130,246,0.5); }
+    
+    .action-row { display: flex; align-items: center; justify-content: center; margin-top: 5px; }
+    .btn-shutter {
+      width: 72px; height: 72px; border-radius: 50%; background: #fff;
+      border: 4px solid rgba(255, 255, 255, 0.3); display: flex; align-items: center; justify-content: center;
+      cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    .btn-shutter:active { transform: scale(0.92); }
+    .btn-shutter-inner { width: 56px; height: 56px; border-radius: 50%; border: 2px solid #000; background: #fff; }
+
+    /* Modal de Resultados */
+    .modal {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(10, 10, 12, 0.95); backdrop-filter: blur(16px);
+      z-index: 20; display: none; flex-direction: column; padding: 20px; overflow-y: auto;
+    }
+    .modal.active { display: flex; }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .modal-title { font-size: 18px; font-weight: 700; }
+    .btn-close { background: none; border: none; color: #94a3b8; font-size: 24px; cursor: pointer; }
+    
+    .output-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .output-card { background: #1e293b; border-radius: 12px; overflow: hidden; border: 1px solid #334155; }
+    .output-card img { width: 100%; height: 110px; object-fit: cover; display: block; background: #000; }
+    .output-card-title { padding: 8px; font-size: 11px; font-weight: 600; text-align: center; color: #cbd5e1; }
+    
+    .btn-download-all {
+      width: 100%; padding: 14px; background: #10b981; border: none; border-radius: 12px;
+      color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+
+    .loading-overlay {
+      position: absolute; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.85);
+      z-index: 30; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+    }
+    .loading-overlay.active { display: flex; }
+    .spinner { width: 44px; height: 44px; border: 4px solid rgba(255,255,255,0.1); border-left-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<div id="app">
+  <div class="viewfinder">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="previewCanvas"></canvas>
+    <div class="hud-badge" id="hudBadge">PREVIEW: NOTAN (3 TONOS)</div>
+  </div>
+
+  <div class="controls">
+    <div class="mode-selector">
+      <div class="btn-mode active" onclick="setPreviewMode(0, this)">Notan</div>
+      <div class="btn-mode" onclick="setPreviewMode(1, this)">Maquette</div>
+      <div class="btn-mode" onclick="setPreviewMode(2, this)">Original</div>
+    </div>
+    
+    <div class="action-row">
+      <div class="btn-shutter" onclick="captureAndProcessPipeline()">
+        <div class="btn-shutter-inner"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="spinner"></div>
+    <div style="font-weight:600; font-size:14px;" id="loadingText">Procesando Pipeline Notan...</div>
+  </div>
+
+  <div class="modal" id="resultsModal">
+    <div class="modal-header">
+      <div class="modal-title">Resultados del Pipeline</div>
+      <button class="btn-close" onclick="closeModal()">&times;</button>
+    </div>
+    <p style="font-size: 12px; color: #94a3b8; margin-bottom: 14px;">
+      Se han generado los 7 archivos listos para descargar en la estructura de tu directorio:
+    </p>
+    <div class="output-grid" id="outputGrid"></div>
+    <button class="btn-download-all" onclick="downloadZipPackage()">📦 Descargar Carpeta Outputs (.ZIP)</button>
+  </div>
+</div>
+
+<canvas id="hdCanvas" style="display:none;"></canvas>
+
+<script>
+  let video = document.getElementById('video');
+  let previewCanvas = document.getElementById('previewCanvas');
+  let ctxPreview = previewCanvas.getContext('2d');
+  let currentPreviewMode = 0;
+  let generatedBlobs = {};
+  let currentFolderName = "";
+
+  async function initCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+      });
+      video.srcObject = stream;
+      video.onloadedmetadata = () => { video.play(); requestAnimationFrame(drawLivePreview); };
+    } catch (err) { alert("Error al acceder a la cámara: " + err.message); }
+  }
+
+  function setPreviewMode(mode, btn) {
+    currentPreviewMode = mode;
+    document.querySelectorAll('.btn-mode').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const labels = ["PREVIEW: NOTAN (3 TONOS)", "PREVIEW: MAQUETTE (BORDES)", "PREVIEW: CÁMARA ORIGINAL"];
+    document.getElementById('hudBadge').innerText = labels[mode];
+  }
+
+  function drawLivePreview() {
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      previewCanvas.width = video.videoWidth; previewCanvas.height = video.videoHeight;
+      if (currentPreviewMode === 2) {
+        ctxPreview.drawImage(video, 0, 0);
+      } else {
+        ctxPreview.drawImage(video, 0, 0);
+        let imgData = ctxPreview.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+        let data = imgData.data, total = previewCanvas.width * previewCanvas.height, lums = new Uint8Array(total);
+        for (let i = 0; i < total; i++) lums[i] = 0.299 * data[i*4] + 0.587 * data[i*4+1] + 0.114 * data[i*4+2];
+
+        let hist = new Int32Array(256);
+        for (let i = 0; i < total; i++) hist[lums[i]]++;
+        let c33 = total * 0.33, c66 = total * 0.66, count = 0, p1 = 85, p2 = 170;
+        for (let i = 0; i < 256; i++) {
+          count += hist[i];
+          if (count >= c33 && p1 === 85) p1 = i;
+          if (count >= c66 && p2 === 170) { p2 = i; break; }
+        }
+
+        if (currentPreviewMode === 0) {
+          for (let i = 0; i < total; i++) {
+            let val = lums[i] <= p1 ? 0 : (lums[i] <= p2 ? 128 : 255);
+            let idx = i * 4; data[idx] = data[idx+1] = data[idx+2] = val;
+          }
+        } else {
+          let w = previewCanvas.width, notan = new Uint8Array(total);
+          for (let i = 0; i < total; i++) notan[i] = lums[i] <= p1 ? 0 : (lums[i] <= p2 ? 128 : 255);
+          for (let y = 0; y < previewCanvas.height - 1; y++) {
+            for (let x = 0; x < w - 1; x++) {
+              let idx = y * w + x;
+              let diff = Math.abs(notan[idx] - notan[idx + 1]) + Math.abs(notan[idx] - notan[idx + w]);
+              let pixIdx = idx * 4; data[pixIdx] = data[pixIdx+1] = data[pixIdx+2] = diff > 10 ? 0 : 255;
+            }
+          }
+        }
+        ctxPreview.putImageData(imgData, 0, 0);
+      }
+    }
+    requestAnimationFrame(drawLivePreview);
+  }
+
+  // Captura y Procesamiento del Pipeline
+  async function captureAndProcessPipeline() {
+    document.getElementById('loadingOverlay').classList.add('active');
+    document.getElementById('loadingText').innerText = "Capturando foto HD...";
+
+    setTimeout(async () => {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      currentFolderName = `foto_${timestamp}`;
+
+      const hdCanvas = document.getElementById('hdCanvas'), hdCtx = hdCanvas.getContext('2d');
+      const vw = video.videoWidth, vh = video.videoHeight;
+      const DPI = 300, TARGET_W_CM = 7, TARGET_H_CM = 5;
+      let targetW = vw >= vh ? Math.round((TARGET_W_CM/2.54)*DPI) : Math.round((TARGET_H_CM/2.54)*DPI);
+      let targetH = vw >= vh ? Math.round((TARGET_H_CM/2.54)*DPI) : Math.round((TARGET_W_CM/2.54)*DPI);
+
+      const targetRatio = targetW / targetH, currentRatio = vw / vh;
+      let cropW = currentRatio > targetRatio ? Math.round(vh * targetRatio) : vw;
+      let cropH = currentRatio > targetRatio ? vh : Math.round(vw / targetRatio);
+      let cropX = Math.floor((vw - cropW) / 2), cropY = Math.floor((vh - cropH) / 2);
+
+      hdCanvas.width = targetW; hdCanvas.height = targetH;
+      hdCtx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+
+      // 1. reference.png
+      document.getElementById('loadingText').innerText = "Generando Referencia y Notan...";
+      const refImgData = hdCtx.getImageData(0, 0, targetW, targetH);
+      const refBlob = await canvasToBlob(hdCanvas);
+
+      // 2. notan.png
+      const totalPixels = targetW * targetH, grayArr = new Float32Array(totalPixels);
+      for (let i = 0; i < totalPixels; i++) grayArr[i] = 0.299 * refImgData.data[i*4] + 0.587 * refImgData.data[i*4+1] + 0.114 * refImgData.data[i*4+2];
+
+      const blurred = gaussianBlur(grayArr, targetW, targetH);
+      const hist = new Int32Array(256);
+      for (let i = 0; i < totalPixels; i++) hist[Math.round(blurred[i])]++;
+      
+      let count = 0, p1 = 85, p2 = 170, t33 = totalPixels * 0.33, t66 = totalPixels * 0.66;
+      let f1 = false, f2 = false;
+      for (let i = 0; i < 256; i++) {
+        count += hist[i];
+        if (!f1 && count >= t33) { p1 = i; f1 = true; }
+        if (!f2 && count >= t66) { p2 = i; f2 = true; }
+      }
+
+      const notanArr = new Uint8Array(totalPixels), notanImgData = hdCtx.createImageData(targetW, targetH);
+      for (let i = 0; i < totalPixels; i++) {
+        const val = blurred[i] <= p1 ? 0 : (blurred[i] <= p2 ? 128 : 255);
+        notanArr[i] = val;
+        let idx = i * 4; notanImgData.data[idx] = notanImgData.data[idx+1] = notanImgData.data[idx+2] = val; notanImgData.data[idx+3] = 255;
+      }
+      const notanCanvas = document.createElement('canvas');
+      notanCanvas.width = targetW; notanCanvas.height = targetH;
+      notanCanvas.getContext('2d').putImageData(notanImgData, 0, 0);
+      const notanBlob = await canvasToBlob(notanCanvas);
+
+      // 3. maquette.png
+      document.getElementById('loadingText').innerText = "Generando Maquette (Bordes)...";
+      const maquetteImgData = hdCtx.createImageData(targetW, targetH);
+      for (let y = 0; y < targetH; y++) {
+        for (let x = 0; x < targetW; x++) {
+          const idx = y * targetW + x;
+          let isEdge = (x < targetW - 1 && Math.abs(notanArr[idx] - notanArr[idx + 1]) > 10) ||
+                       (y < targetH - 1 && Math.abs(notanArr[idx] - notanArr[idx + targetW]) > 10);
+          let pIdx = idx * 4;
+          maquetteImgData.data[pIdx] = maquetteImgData.data[pIdx+1] = maquetteImgData.data[pIdx+2] = isEdge ? 0 : 255;
+          maquetteImgData.data[pIdx+3] = 255;
+        }
+      }
+      const maquetteCanvas = document.createElement('canvas');
+      maquetteCanvas.width = targetW; maquetteCanvas.height = targetH;
+      maquetteCanvas.getContext('2d').putImageData(maquetteImgData, 0, 0);
+      const maquetteBlob = await canvasToBlob(maquetteCanvas);
+
+      // 4. Rejillas
+      document.getElementById('loadingText').innerText = "Generando Rejillas de Composición...";
+      const gridThirdsBlob = await generateGrid(notanCanvas, "thirds");
+      const gridPhiBlob = await generateGrid(notanCanvas, "phi");
+      const gridDiagBlob = await generateGrid(notanCanvas, "diagonal");
+
+      // 5. Foco de Luz
+      document.getElementById('loadingText').innerText = "Calculando Centro de Masa de Luz...";
+      const lightSourceBlob = await generateLightSource(notanCanvas, blurred, targetW, targetH);
+
+      generatedBlobs = {
+        "reference.png": refBlob,
+        "notan.png": notanBlob,
+        "maquette.png": maquetteBlob,
+        "notan_grid_thirds.png": gridThirdsBlob,
+        "notan_grid_phi.png": gridPhiBlob,
+        "notan_grid_diagonal.png": gridDiagBlob,
+        "notan_light_source.png": lightSourceBlob
+      };
+
+      renderOutputModal();
+      document.getElementById('loadingOverlay').classList.remove('active');
+      document.getElementById('resultsModal').classList.add('active');
+    }, 100);
+  }
+
+  function gaussianBlur(src, w, h) {
+    const dst = new Float32Array(src.length);
+    for (let y = 2; y < h - 2; y++) {
+      for (let x = 2; x < w - 2; x++) {
+        let sum = 0;
+        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) sum += src[(y + dy) * w + (x + dx)];
+        dst[y * w + x] = sum / 25;
+      }
+    }
+    return dst;
+  }
+
+  async function generateGrid(baseCanvas, gridType) {
+    const canvas = document.createElement('canvas');
+    canvas.width = baseCanvas.width; canvas.height = baseCanvas.height;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(baseCanvas, 0, 0);
+    ctx.strokeStyle = "rgb(255, 0, 0)"; ctx.lineWidth = 3; ctx.beginPath();
+    const w = canvas.width, h = canvas.height;
+    if (gridType === "thirds") {
+      ctx.moveTo(w/3, 0); ctx.lineTo(w/3, h); ctx.moveTo(2*w/3, 0); ctx.lineTo(2*w/3, h);
+      ctx.moveTo(0, h/3); ctx.lineTo(w, h/3); ctx.moveTo(0, 2*h/3); ctx.lineTo(w, 2*h/3);
+    } else if (gridType === "phi") {
+      ctx.moveTo(w*0.382, 0); ctx.lineTo(w*0.382, h); ctx.moveTo(w*0.618, 0); ctx.lineTo(w*0.618, h);
+      ctx.moveTo(0, h*0.382); ctx.lineTo(w, h*0.382); ctx.moveTo(0, h*0.618); ctx.lineTo(w, h*0.618);
+    } else if (gridType === "diagonal") {
+      ctx.moveTo(0, 0); ctx.lineTo(w, h); ctx.moveTo(w, 0); ctx.lineTo(0, h);
+    }
+    ctx.stroke();
+    return await canvasToBlob(canvas);
+  }
+
+  async function generateLightSource(baseCanvas, blurredArr, w, h) {
+    const hist = new Int32Array(256);
+    for (let i = 0; i < blurredArr.length; i++) hist[Math.round(blurredArr[i])]++;
+    let count = 0, target98 = blurredArr.length * 0.98, thresh98 = 240;
+    for (let i = 0; i < 256; i++) { count += hist[i]; if (count >= target98) { thresh98 = i; break; } }
+
+    let sumX = 0, sumY = 0, totalW = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const val = blurredArr[y * w + x];
+        if (val >= thresh98) {
+          const weight = val - thresh98 + 1;
+          sumX += x * weight; sumY += y * weight; totalW += weight;
+        }
+      }
+    }
+    let lx = totalW > 0 ? sumX / totalW : w / 2, ly = totalW > 0 ? sumY / totalW : h / 2;
+
+    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(baseCanvas, 0, 0);
+    ctx.strokeStyle = "rgb(255, 220, 0)"; ctx.lineWidth = 4; ctx.beginPath();
+    ctx.arc(lx, ly, 18, 0, 2 * Math.PI);
+    ctx.moveTo(lx - 8, ly); ctx.lineTo(lx + 8, ly);
+    ctx.moveTo(lx, ly - 8); ctx.lineTo(lx, ly + 8); ctx.stroke();
+
+    return await canvasToBlob(canvas);
+  }
+
+  function canvasToBlob(canvas) { return new Promise(resolve => canvas.toBlob(resolve, 'image/png')); }
+
+  function renderOutputModal() {
+    const grid = document.getElementById('outputGrid'); grid.innerHTML = "";
+    for (let name in generatedBlobs) {
+      const url = URL.createObjectURL(generatedBlobs[name]);
+      const card = document.createElement('div'); card.className = "output-card";
+      card.innerHTML = `<img src="${url}"><div class="output-card-title">${name.replace('.png', '')}</div>`;
+      grid.appendChild(card);
+    }
+  }
+
+  function closeModal() { document.getElementById('resultsModal').classList.remove('active'); }
+
+  async function downloadZipPackage() {
+    const zip = new JSZip();
+    const folder = zip.folder(`outputs/${currentFolderName}`);
+    for (let filename in generatedBlobs) folder.file(filename, generatedBlobs[filename]);
+    const content = await zip.generateAsync({ type: "blob" });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(content);
+    link.download = `${currentFolderName}_outputs.zip`;
+    link.click();
+  }
+
+  window.onload = initCamera;
+</script>
+</body>
+</html>
